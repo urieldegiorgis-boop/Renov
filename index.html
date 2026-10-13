@@ -6,7 +6,6 @@
 <title>Lathos · Renovaciones</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <style>
   :root{
     --bg:#f5f6fa; --wh:#FFFFFF;
@@ -223,12 +222,50 @@
   </div>
 </div>
 <script>
-// ======================= CONFIGURACIÓN SUPABASE =======================
-// Pega aquí la URL de tu proyecto y la clave anon (Settings → API en Supabase)
-const SUPABASE_URL  = 'https://hseluvpwqjgallfyzori.supabase.co';
-const SUPABASE_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhzZWx1dnB3cWpnYWxsZnl6b3JpIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzU3MjIxNjgsImV4cCI6MjA5MTI5ODE2OH0.hZ57PMADQPaqISd5ugWozVDQQHiR61aoPSQp1-mP-6s';
-// ======================================================================
-const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON);
+// ======================= DATOS POR SERVIDOR =======================
+// Ya no se habla con Supabase desde el navegador: todo pasa por /api/renov
+// del Hub, que comprueba la contrasena del Hub en el servidor.
+// Dentro del Hub la contrasena llega sola (postMessage); abierto suelto, se pide.
+var HUB_BASE = 'https://lathos-hub.vercel.app';
+var HUB_PASS = null;
+try{ HUB_PASS = localStorage.getItem('renov_hub_pass'); }catch(e){}
+
+function hubPassFromParent(){
+  return new Promise(function(resolve){
+    if(window.parent === window){ resolve(null); return; }
+    var done = false;
+    function onMsg(ev){
+      var d = ev.data;
+      if(!d || d.t !== 'hub-pass' || done) return;
+      done = true; window.removeEventListener('message', onMsg);
+      if(d.base) HUB_BASE = d.base;
+      resolve(d.pass || null);
+    }
+    window.addEventListener('message', onMsg);
+    try{ window.parent.postMessage({ t:'hub-pass-request' }, '*'); }catch(e){}
+    setTimeout(function(){ if(done) return; done = true; window.removeEventListener('message', onMsg); resolve(null); }, 2000);
+  });
+}
+
+async function api(body){
+  if(!HUB_PASS){ HUB_PASS = await hubPassFromParent(); }
+  for(var intento=0; intento<3; intento++){
+    if(!HUB_PASS){
+      HUB_PASS = prompt('🔒 Contraseña del Hub:');
+      if(HUB_PASS === null) throw new Error('Sin contraseña');
+    }
+    var r = await fetch(HUB_BASE + '/api/renov', {
+      method:'POST', headers:{ 'Content-Type':'application/json', 'x-hub-pass':HUB_PASS }, body:JSON.stringify(body)
+    });
+    if(r.status === 401){ HUB_PASS = null; try{ localStorage.removeItem('renov_hub_pass'); }catch(e){} continue; }
+    var j = null; try{ j = await r.json(); }catch(e){}
+    if(!r.ok) throw new Error((j && j.error) || ('HTTP ' + r.status));
+    try{ if(window.parent === window) localStorage.setItem('renov_hub_pass', HUB_PASS); }catch(e){}
+    return j || {};
+  }
+  throw new Error('Contraseña incorrecta');
+}
+// ==================================================================
 
 let LEADS=[];
 let overrides={};   // { email_key: 'Renovado' }
@@ -364,12 +401,8 @@ async function persist(key){
   const status=overrides[key]||null;
   const note=notes[key]||null;
   try{
-    if(!status && !note){
-      await sb.from('lead_status').delete().eq('email_key',key);
-    } else {
-      await sb.from('lead_status').upsert({email_key:key,status,note},{onConflict:'email_key'});
-    }
-  }catch(e){console.error('Supabase persist error:',e);alert('No se pudo guardar en Supabase. Revisa la conexión.');}
+    await api({action:'save',key,status,note});
+  }catch(e){console.error('persist error:',e);alert('No se pudo guardar. Revisa la conexión.');}
 }
 async function setStatus(key,val){
   if(val)overrides[key]=val; else delete overrides[key];
@@ -455,30 +488,16 @@ function renderCat(){
 }
 
 async function fetchAllLeads(){
-  const all=[]; const size=1000; let from=0;
-  while(true){
-    const {data,error}=await sb.from('leads')
-      .select('date,ptype,name,email,country,amount,offer')
-      .order('date',{ascending:true}).range(from,from+size-1);
-    if(error)throw error;
-    all.push(...data);
-    if(data.length<size)break;
-    from+=size;
-  }
-  return all;
+  const out=await api({action:'leads'});
+  return out.data||[];
 }
 
 async function init(){
   const nsub=document.querySelector('.nav-sub');
   try{
-    if(SUPABASE_URL.includes('TU-PROYECTO')||SUPABASE_ANON.includes('TU_CLAVE')){
-      nsub.textContent='⚠ Falta configurar SUPABASE_URL y SUPABASE_ANON en el código';
-      nsub.style.color='#fbbf24'; return;
-    }
-    nsub.textContent='Cargando desde Supabase…';
+    nsub.textContent='Cargando…';
     LEADS=await fetchAllLeads();
-    const {data:st,error}=await sb.from('lead_status').select('email_key,status,note');
-    if(error)throw error;
+    const st=(await api({action:'status'})).data;
     overrides={}; notes={};
     (st||[]).forEach(r=>{ if(r.status)overrides[r.email_key]=r.status; if(r.note)notes[r.email_key]=r.note; });
     buildDerived();
@@ -486,7 +505,7 @@ async function init(){
     nsub.textContent='Renovaciones · '+LEADS.length+' registros · '+renewals.length+' personas';
   }catch(e){
     console.error(e);
-    nsub.textContent='Error al conectar con Supabase (revisa URL/clave y que las tablas existan)';
+    nsub.textContent='Error al cargar: '+((e&&e.message)||e);
     nsub.style.color='#f87171';
   }
 }
